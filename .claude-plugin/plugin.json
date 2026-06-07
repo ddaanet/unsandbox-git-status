@@ -1,0 +1,15 @@
+{
+  "$schema": "https://json.schemastore.org/claude-code-plugin.json",
+  "name": "unsandbox-git-status",
+  "displayName": "Unsandbox git status",
+  "version": "0.0.0",
+  "description": "Forces `git status` to run with the Claude Code command sandbox disabled, so it reports the real working tree instead of phantom sandbox-mount entries.",
+  "author": {
+    "name": "David Allouche",
+    "email": "david@allouche.net"
+  },
+  "homepage": "https://github.com/ddaanet/unsandbox-git-status",
+  "repository": "https://github.com/ddaanet/unsandbox-git-status",
+  "license": "MIT",
+  "keywords": ["git", "sandbox", "hook", "pretooluse", "claude-code"]
+}
