@@ -66,7 +66,8 @@ just release [patch|minor|major]
 
 Bumps `plugin.json`, commits `release: X.Y.Z`, tags, pushes, creates a
 GitHub release, and bumps the marketplace entry. Requires `MARKETPLACE_DIR`
-set (see `.envrc`). The manifest version represents the last released
+set (inherited from the parent directory's `.envrc` via `source_up_if_exists`).
+The manifest version represents the last released
 version; `release` bumps from there. The first release is `minor`
 (`0.0.0 → 0.1.0`).
 
