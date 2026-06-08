@@ -24,6 +24,9 @@ mind when editing — its output is read by another agent, not a human.
   cases, including false-positive guards. Runs in `precommit`.
 - `plugin-dev/` — vendored `claude-plugin-dev` release toolkit (subtree).
   Provides the `release` recipe and the `version-guard` hook.
+- `memory/` — gitlore memory store, a **git submodule**
+  (`unsandbox-git-status-memory.git`), not a regular directory. `.gitlore/bin`
+  is added to `PATH` by `.envrc`.
 - `DESIGN.md` — living rationale: FR, NFR, decisions, limitations,
   history. Update it when design choices change.
 
@@ -70,6 +73,14 @@ set (inherited from the parent directory's `.envrc` via `source_up_if_exists`).
 The manifest version represents the last released
 version; `release` bumps from there. The first release is `minor`
 (`0.0.0 → 0.1.0`).
+
+## Tooling hooks
+
+Two hooks affect committing in this repo:
+- **gitmoji** rewrites conventional-commit prefixes to emoji on commit
+  (so `release: X.Y.Z` lands as an emoji-prefixed message).
+- **gitlore** may block a commit/push with a memory-merge prompt; resolve it
+  with `/gitlore:resolve`.
 
 ## Conventions
 
