@@ -15,46 +15,77 @@ fail() {
   failures=$((failures + 1))
 }
 
-# verdict: prints DENY or ALLOW for a (command, dangerouslyDisableSandbox) pair.
-verdict() {
-  local out
-  out="$(jq -nc --arg c "$1" --argjson d "$2" \
+# run: feeds a (command, dangerouslyDisableSandbox) pair to the hook and prints
+# its raw stdout.
+run() {
+  jq -nc --arg c "$1" --argjson d "$2" \
     '{tool_name:"Bash", tool_input:{command:$c, dangerouslyDisableSandbox:$d}}' \
-    | bash "$hook")"
-  if printf '%s' "$out" | grep -q '"permissionDecision":"deny"'; then
-    printf 'DENY'
+    | bash "$hook"
+}
+
+# verdict: REWRITE when the hook forces the call unsandboxed (allow +
+# updatedInput.dangerouslyDisableSandbox=true); PASS when it lets the call
+# through untouched (no output).
+verdict() {
+  if printf '%s' "$1" | jq -e \
+    '.hookSpecificOutput.permissionDecision == "allow"
+      and .hookSpecificOutput.updatedInput.dangerouslyDisableSandbox == true' \
+    >/dev/null 2>&1; then
+    printf 'REWRITE'
   else
-    printf 'ALLOW'
+    printf 'PASS'
   fi
 }
 
 check() { # $1=command  $2=disabled  $3=expected
   local got
-  got="$(verdict "$1" "$2")"
+  got="$(verdict "$(run "$1" "$2")")"
   [ "$got" = "$3" ] || fail "[$1] sandbox_off=$2: expected $3, got $got"
 }
 
-# Sandboxed git status in its many shapes: deny.
-check 'git status'                              false DENY
-check 'git status -s'                           false DENY
-check 'git status --porcelain'                  false DENY
-check 'git -C /tmp/x status'                    false DENY
-check 'git --no-pager status'                   false DENY
-check 'git -c color.ui=false status'           false DENY
-check 'GIT_PAGER=cat git status'               false DENY
-check 'git add . && git status'                false DENY
-check 'cd foo; git status'                      false DENY
+# Sandboxed git status in its many shapes: force unsandboxed.
+check 'git status'                              false REWRITE
+check 'git status -s'                           false REWRITE
+check 'git status --porcelain'                  false REWRITE
+check 'git -C /tmp/x status'                    false REWRITE
+check 'git --no-pager status'                   false REWRITE
+check 'git -c color.ui=false status'           false REWRITE
+check 'GIT_PAGER=cat git status'               false REWRITE
+check 'git add . && git status'                false REWRITE
+check 'cd foo; git status'                      false REWRITE
 
-# Unsandboxed git status: allow.
-check 'git status'                              true  ALLOW
+# Already unsandboxed: nothing to do, pass through.
+check 'git status'                              true  PASS
 
-# Not git status: allow (false-positive guards).
-check 'git commit -m "fix status bar"'         false ALLOW
-check 'git log --grep status'                   false ALLOW
-check 'git stash'                               false ALLOW
-check 'echo "git status"'                       false ALLOW
-check 'grep "git status" file.txt'             false ALLOW
-check 'ls -la'                                   false ALLOW
+# Not git status: pass through untouched (false-positive guards). Forcing an
+# unrelated command unsandboxed would be a needless privilege grant, so these
+# must NOT be rewritten.
+check 'git commit -m "fix status bar"'         false PASS
+check 'git log --grep status'                   false PASS
+check 'git stash'                               false PASS
+check 'echo "git status"'                       false PASS
+check 'grep "git status" file.txt'             false PASS
+check 'ls -la'                                   false PASS
+
+# The rewrite must be surgical: preserve the command verbatim and every other
+# tool_input field, flipping only the sandbox flag. A verbatim re-run is the
+# whole point — no edit, no split, no dropped argument.
+preserve_out="$(jq -nc \
+  '{tool_name:"Bash", tool_input:{command:"git add . && git status -s",
+    description:"stage and check", timeout:5000, dangerouslyDisableSandbox:false}}' \
+  | bash "$hook")"
+
+got_cmd="$(printf '%s' "$preserve_out" | jq -r '.hookSpecificOutput.updatedInput.command')"
+[ "$got_cmd" = 'git add . && git status -s' ] \
+  || fail "rewrite altered the command: got [$got_cmd]"
+
+got_desc="$(printf '%s' "$preserve_out" | jq -r '.hookSpecificOutput.updatedInput.description')"
+[ "$got_desc" = 'stage and check' ] \
+  || fail "rewrite dropped the description field: got [$got_desc]"
+
+got_timeout="$(printf '%s' "$preserve_out" | jq -r '.hookSpecificOutput.updatedInput.timeout')"
+[ "$got_timeout" = '5000' ] \
+  || fail "rewrite dropped the timeout field: got [$got_timeout]"
 
 if (( failures > 0 )); then
   printf '\n%d failure(s)\n' "$failures" >&2

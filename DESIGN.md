@@ -25,16 +25,21 @@ files or waste turns reconciling noise.
 
 The fix is mechanical and unambiguous: `git status` must run unsandboxed.
 This plugin enforces that with a `PreToolUse` hook so it doesn't depend on
-anyone remembering.
+anyone remembering — and the hook applies the fix *itself*, rewriting the
+call to run unsandboxed rather than asking the agent to retry.
 
 ## Functional requirements (FR)
 
-- **FR1** — Deny any `git status` invocation that runs with the command
-  sandbox enabled.
-- **FR2** — On deny, instruct the agent to re-run the *identical* command
-  with `dangerouslyDisableSandbox: true`.
-- **FR3** — Allow `git status` when the call is already unsandboxed.
-- **FR4** — Gate `git status` only. Every other command, and every other
+- **FR1** — Force any `git status` invocation that runs with the command
+  sandbox enabled to run unsandboxed instead. Do this by rewriting the tool
+  call in place (allow + `updatedInput` with `dangerouslyDisableSandbox:
+  true`), not by denying it.
+- **FR2** — The fix is mechanical: no agent round-trip. The agent is never
+  asked to retry, edit, or reason about the command, so it cannot improvise
+  a workaround or draw a wrong lesson from the block.
+- **FR3** — Pass through untouched any `git status` that is already
+  unsandboxed (nothing to fix).
+- **FR4** — Touch `git status` only. Every other command, and every other
   git subcommand (`log`, `diff`, `commit`, `add`, …), passes untouched.
 - **FR5** — Recognise `git status` across realistic shapes: status flags
   (`-s`, `--porcelain`), git global options including arg-consuming ones
@@ -52,8 +57,9 @@ anyone remembering.
   fires on *every* Bash call. It must stay at a couple of `jq` parses plus
   string work — no subprocess fan-out, no git invocations.
 - **NFR3 — Fail-open.** Malformed or unexpected input (missing command,
-  unparseable JSON) allows the call. Blocking real work is worse than
-  letting an exotic `git status` slip through.
+  unparseable JSON) passes the call through untouched. Letting an exotic
+  `git status` slip through sandboxed only reproduces today's behaviour;
+  it is never worse than the status quo.
 - **NFR4 — Portable.** `bash` + `jq` only. `sed -E` for the split; no
   GNU-only tooling beyond what Claude Code environments already provide.
 - **NFR5 — Self-tested.** A scenario harness (`tests/hook-test.sh`)
@@ -91,25 +97,36 @@ costs nothing beyond the status quo (a sandboxed status slips through, as
 it does today). A false positive is disruptive (an unrelated command
 blocked mid-task). When in doubt, allow.
 
-### Deny via `permissionDecision`, exit 0
+### Rewrite via `updatedInput`, not deny-and-retry
 
 The hook emits
-`{"hookSpecificOutput": {"permissionDecision": "deny", "permissionDecisionReason": …}}`
-on stdout and exits 0, with a `systemMessage` for the human channel. This
-is the documented rich-permission mechanism and lets the hook carry two
-distinct messages:
+`{"hookSpecificOutput": {"permissionDecision": "allow", "updatedInput": …}}`
+on stdout and exits 0, where `updatedInput` is the original `tool_input`
+with `dangerouslyDisableSandbox` flipped to `true`. Per the hooks API,
+`updatedInput` replaces the tool's arguments before it runs, so the command
+executes unsandboxed with no further interaction. A one-line `systemMessage`
+notes that it happened, for the human and the transcript.
 
-- `permissionDecisionReason` — agent-facing, an unconditional instruction
-  to re-run with the sandbox flag. No escape hatches the agent could read
-  as "optional."
-- `systemMessage` — one curt line for the human, surfacing *that* a block
-  happened.
+**This overturns the original deny-and-retry design** (`permissionDecision:
+"deny"` with an agent-facing `permissionDecisionReason` instructing a
+verbatim re-run). That design was correct about the desired end state but
+delegated the last step to the agent — and an agent reading a denial reasons
+about it instead of mechanically obeying. Observed in practice (Opus 4.8,
+2026-06-10): handed "re-run the exact same command with
+`dangerouslyDisableSandbox: true`," the model instead *stripped* `git
+status` out of an `&&` chain, re-ran the trimmed command, and concluded the
+false lesson "don't put `git status` in compound commands." The denial
+message led with the *mechanism* (phantom entries), which invited
+cause-focused improvisation; it never stated the whole command was blocked
+and unrun, so the model hedged rather than retrying verbatim.
 
-The alternative (exit 2 with the reason on stderr) also blocks, but the
-JSON/`permissionDecision` path is the canonical way to express a deny
-decision and to split the two channels cleanly. The split matters because
-agents read instructions literally: a diagnostic worded for humans that
-mentions a bypass gets parsed as permission to bypass.
+The rewrite removes the delegated step entirely. There is no instruction for
+the agent to misread, no round-trip, no opportunity to improvise or
+mislearn. It is also strictly cheaper (zero extra turns) and degrades more
+gracefully on a false positive (see Limitations). The cost is that the fix
+is now invisible to the agent by default; the `systemMessage` exists so the
+change is not silent, and is phrased as *information* ("ran unsandboxed; no
+action needed"), never as an instruction the agent must act on.
 
 ### Fire on every Bash call, filter internally
 
@@ -153,9 +170,19 @@ is `0.0.0`; the first `just release minor` cuts `v0.1.0`.
   embeds one of those operators *followed by* `git status …` inside a
   quoted string (e.g. `echo "step 1; git status here"`) over-splits into a
   segment whose command word is `git` and subcommand `status`, producing a
-  false-positive deny. This is rare and low-cost (the agent re-runs
-  unsandboxed and the echo succeeds). A full tokenizer would fix it at the
-  cost of complexity that NFR2/NFR4 don't justify.
+  false-positive match. Under the rewrite design this is benign in effect:
+  the command runs unsandboxed and succeeds identically — far gentler than
+  the old deny, which blocked the command outright. A full tokenizer would
+  remove the misfire at a complexity cost that NFR2/NFR4 don't justify.
+- **A false positive silently disables the sandbox for that one call.**
+  The flip side of the gentler failure mode: where the old design blocked an
+  over-split command (no privilege change), the rewrite runs it unsandboxed
+  without announcing the matcher misfired. For the realistic confusables
+  (`echo "git status"`, a quoted operator) this is harmless. It is still a
+  privilege grant the user didn't request, which is why the matcher stays
+  precision-biased — a miss costs nothing, and a false positive should be
+  rare enough that silently unsandboxing it is acceptable. The
+  `systemMessage` ("ran git status unsandboxed") is the only trace.
 - **`jq` dependency, silent if absent.** The hook needs `jq` on `PATH`.
   Combined with fail-open (NFR3), a missing `jq` means the guard quietly
   does nothing rather than erroring — by design, but worth stating.
@@ -176,3 +203,21 @@ is `0.0.0`; the first `just release minor` cuts `v0.1.0`.
   Next: first release via `just release minor` (→ `v0.1.0`), then add the
   marketplace entry to `ddaanet/claude-plugins` so end users can install
   it.
+
+- **2026-06-10 — deny-and-retry → transparent rewrite.** Switched the
+  enforcement mechanism from `permissionDecision: "deny"` (with an
+  agent-facing instruction to re-run unsandboxed) to `permissionDecision:
+  "allow"` + `updatedInput`, which flips `dangerouslyDisableSandbox` to
+  `true` on the call and lets it run. Prompted by a real failure: handed the
+  old denial message, Opus 4.8 stripped `git status` out of an `&&` chain
+  instead of retrying verbatim, and mislearned "avoid `git status` in
+  compound commands" (the compound chaining is irrelevant; the sandbox is
+  the whole problem). Rewriting the call removes the delegated retry step —
+  the agent is never asked to do anything, so it cannot improvise or
+  mislearn. Rewrote FR1–FR3, the enforcement decision, and the
+  false-positive limitation (a misfire now unsandboxes harmlessly rather
+  than blocking). The matcher (command-word detection, global-option
+  walking, compound-command split) is unchanged; only the action on a match
+  changed. Tests updated to assert REWRITE/PASS instead of DENY/ALLOW, plus
+  a verbatim-preservation scenario (command and other `tool_input` fields
+  survive the flip). Still `v0.0.0`, unreleased.

@@ -18,8 +18,8 @@ mind when editing — its output is read by another agent, not a human.
 - `hooks/hooks.json` — registers the `PreToolUse(Bash)` hook. The command
   uses `${CLAUDE_PLUGIN_ROOT}`, which Claude Code expands at fire time.
 - `hooks/require-unsandboxed-git-status.sh` — the hook itself. Reads the
-  PreToolUse JSON on stdin, denies a sandboxed `git status`, allows
-  everything else.
+  PreToolUse JSON on stdin, rewrites a sandboxed `git status` to run
+  unsandboxed (allow + `updatedInput`), passes everything else through.
 - `tests/hook-test.sh` — scenario test for the hook. Deny and allow
   cases, including false-positive guards. Runs in `precommit`.
 - `plugin-dev/` — vendored `claude-plugin-dev` release toolkit (subtree).
@@ -42,21 +42,30 @@ hook test. Must be green before committing.
 ## The hook's contract
 
 - **Fail-open.** Any unexpected input (missing command, unparseable JSON,
-  already-unsandboxed call) must result in exit 0 / allow. Never block on
-  uncertainty — blocking real work is worse than missing an exotic
-  `git status`.
+  already-unsandboxed call) must result in exit 0 with no rewrite — the call
+  passes through untouched. Never act on uncertainty: an exotic `git status`
+  slipping through sandboxed only reproduces today's behaviour, whereas
+  rewriting the wrong command silently disables its sandbox.
 - **Match the command word, not a substring.** Detection splits on shell
   operators and, per segment, checks that the command word is `git`
   (after skipping `VAR=value` env assignments) and the subcommand is
   `status` (after walking git's global options, including arg-consuming
   ones like `-C` and `-c`). This is what keeps `git commit -m "...status"`
-  and `echo "git status"` from being denied. Preserve this bias when
-  changing the matcher: prefer a miss over a false positive.
-- **Dual-channel output.** On deny, `permissionDecisionReason` is the
-  agent-facing instruction (re-run with `dangerouslyDisableSandbox`);
-  `systemMessage` is the one-line human notice. Do not soften the agent
-  reason into something that reads as an optional suggestion, and do not
-  add escape hatches the agent could self-authorise.
+  and `echo "git status"` from being rewritten. Preserve this bias when
+  changing the matcher: prefer a miss over a false positive — a miss just
+  reproduces today's behaviour, a false positive silently unsandboxes an
+  unrelated command.
+- **Rewrite, don't deny.** On a match the hook emits `permissionDecision:
+  "allow"` with `updatedInput` — the original `tool_input` with
+  `dangerouslyDisableSandbox` flipped to `true` — so the command runs
+  unsandboxed with no agent round-trip. Build `updatedInput` from the real
+  `tool_input` (`jq '.tool_input | .dangerouslyDisableSandbox = true'`) so
+  the command and every other field survive verbatim; never reconstruct it
+  by hand. `systemMessage` is a one-line *informational* notice ("ran
+  unsandboxed; no action needed") — keep it information, never an
+  instruction the agent must act on. The old deny-and-retry design was
+  overturned because agents reason about a denial instead of obeying it
+  (see DESIGN history, 2026-06-10).
 - **Cheap.** The hook fires on every Bash call (the `matcher` filters by
   tool name only). Keep it to jq parses and string work — no subprocess
   fan-out.

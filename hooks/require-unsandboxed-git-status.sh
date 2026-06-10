@@ -1,16 +1,19 @@
 #!/usr/bin/env bash
-# PreToolUse(Bash) guard: require `git status` to run with the command
-# sandbox disabled.
+# PreToolUse(Bash) guard: force `git status` to run with the command sandbox
+# disabled.
 #
 # Under the Claude Code command sandbox, mounted artifacts can surface as
 # phantom entries in a repository's working tree, so a sandboxed `git status`
 # reports files that do not exist on the real filesystem. Running git status
-# unsandboxed reports the true state. This hook denies a sandboxed `git status`
-# and tells the agent to re-run the same Bash call with
-# dangerouslyDisableSandbox set to true.
+# unsandboxed reports the true state. When this hook spots a sandboxed
+# `git status`, it rewrites the call in place — allow + updatedInput with
+# dangerouslyDisableSandbox set to true — so the command runs unsandboxed with
+# no agent round-trip. The agent is never asked to retry, so it cannot
+# improvise or draw the wrong lesson; the fix is mechanical and invisible.
 #
-# Scope is deliberately narrow: only `git status` is gated. Every other command,
-# including every other git subcommand, passes untouched. See DESIGN.md.
+# Scope is deliberately narrow: only `git status` is touched. Every other
+# command, including every other git subcommand, passes through unchanged. See
+# DESIGN.md.
 
 set -euo pipefail
 
@@ -57,10 +60,14 @@ is_git_status() {
 while IFS= read -r seg; do
   [ -n "$seg" ] || continue
   if is_git_status "$seg"; then
-    agent_reason="git status was run sandboxed. Re-run the exact same Bash command with dangerouslyDisableSandbox set to true. Under the command sandbox, mounted artifacts surface as phantom working-tree entries, so a sandboxed git status misreports the repository state. This applies only to git status; other commands and other git subcommands are unaffected."
-    human_msg="unsandbox-git-status: blocked a sandboxed git status (re-run unsandboxed)"
-    jq -nc --arg r "$agent_reason" --arg s "$human_msg" \
-      '{hookSpecificOutput: {hookEventName: "PreToolUse", permissionDecision: "deny", permissionDecisionReason: $r}, systemMessage: $s}'
+    # Force this call unsandboxed: re-emit the tool_input verbatim with only
+    # dangerouslyDisableSandbox flipped to true. updatedInput replaces the
+    # tool's arguments, so we carry every field through and change one — the
+    # command, and any timeout/description, run exactly as the agent wrote them.
+    updated_input=$(printf '%s' "$input" | jq -c '.tool_input | .dangerouslyDisableSandbox = true')
+    human_msg="unsandbox-git-status: ran git status unsandboxed (the command sandbox misreports the working tree). No action needed."
+    jq -nc --argjson ui "$updated_input" --arg s "$human_msg" \
+      '{hookSpecificOutput: {hookEventName: "PreToolUse", permissionDecision: "allow", updatedInput: $ui}, systemMessage: $s}'
     exit 0
   fi
 done <<EOF
