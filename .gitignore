@@ -1,2 +1,6 @@
 .DS_Store
 .claude/settings.local.json
+
+# Handoff plugin: pointer to the current session transcript. Session-specific
+# — handoff-task.md is versioned, this is not.
+.claude/handoff-session

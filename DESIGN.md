@@ -147,12 +147,6 @@ infrastructure used by the author's other plugins. Vendored via
 DESIGN for the reasoning behind subtree-over-submodule and tags-only
 versioning.
 
-### Manifest version starts at `0.0.0`
-
-The plugin has not been released yet. Following the toolkit's invariant
-that the manifest holds the *last released* version, an unreleased plugin
-is `0.0.0`; the first `just release minor` cuts `v0.1.0`.
-
 ## Limitations
 
 - **Sandbox-specific premise.** The plugin exists because the sandbox
@@ -189,20 +183,16 @@ is `0.0.0`; the first `just release minor` cuts `v0.1.0`.
 
 ## History
 
-- **2026-06-07 — initial (`v0.0.0`, unreleased).** Extracted from a
+- **2026-06-07 — initial.** Extracted from a
   project-local `PreToolUse(Bash)` hook first written for the
   `candidature` repo, where a sandboxed `git status` was listing phantom
   `.claude` device nodes. Generalised into a standalone plugin: narrowed
   the contract to `git status`, made the matcher command-word-based with
   global-option walking and compound-command splitting, and added a
   16-scenario hook test (deny/allow plus false-positive guards), green;
-  `shellcheck` clean. Built on `claude-plugin-dev` v0.2.0, subtree-vendored
-  at `plugin-dev/`, with the `version-guard` hook wired into
-  `.claude/settings.json`.
-
-  Next: first release via `just release minor` (→ `v0.1.0`), then add the
-  marketplace entry to `ddaanet/claude-plugins` so end users can install
-  it.
+  `shellcheck` clean. Built on the vendored `claude-plugin-dev` toolkit,
+  subtree-vendored at `plugin-dev/`, with the `version-guard` hook wired
+  into `.claude/settings.json`.
 
 - **2026-06-10 — deny-and-retry → transparent rewrite.** Switched the
   enforcement mechanism from `permissionDecision: "deny"` (with an
@@ -220,4 +210,4 @@ is `0.0.0`; the first `just release minor` cuts `v0.1.0`.
   walking, compound-command split) is unchanged; only the action on a match
   changed. Tests updated to assert REWRITE/PASS instead of DENY/ALLOW, plus
   a verbatim-preservation scenario (command and other `tool_input` fields
-  survive the flip). Still `v0.0.0`, unreleased.
+  survive the flip).
