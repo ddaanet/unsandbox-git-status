@@ -65,7 +65,7 @@ while IFS= read -r seg; do
     # tool's arguments, so we carry every field through and change one — the
     # command, and any timeout/description, run exactly as the agent wrote them.
     updated_input=$(printf '%s' "$input" | jq -c '.tool_input | .dangerouslyDisableSandbox = true')
-    human_msg="unsandbox-git-status: ran git status unsandboxed (the command sandbox misreports the working tree). No action needed."
+    human_msg="unsandbox-git-status: ran git status unsandboxed."
     jq -nc --argjson ui "$updated_input" --arg s "$human_msg" \
       '{hookSpecificOutput: {hookEventName: "PreToolUse", permissionDecision: "allow", updatedInput: $ui}, systemMessage: $s}'
     exit 0
