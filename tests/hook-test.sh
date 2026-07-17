@@ -87,6 +87,30 @@ got_timeout="$(printf '%s' "$preserve_out" | jq -r '.hookSpecificOutput.updatedI
 [ "$got_timeout" = '5000' ] \
   || fail "rewrite dropped the timeout field: got [$got_timeout]"
 
+# The rewrite announces itself on both channels: systemMessage reaches the human,
+# additionalContext reaches the model. additionalContext is what keeps an agent
+# from reading unsandboxed output as evidence about the sandbox; systemMessage
+# never enters the model's context, so it cannot carry that load alone.
+notice_out="$(run 'git status' false)"
+
+got_sysmsg="$(printf '%s' "$notice_out" | jq -r '.systemMessage // ""')"
+[ -n "$got_sysmsg" ] \
+  || fail "rewrite emitted no systemMessage for the human"
+
+got_ctx="$(printf '%s' "$notice_out" | jq -r '.hookSpecificOutput.additionalContext // ""')"
+[ -n "$got_ctx" ] \
+  || fail "rewrite emitted no additionalContext for the model"
+
+got_event="$(printf '%s' "$notice_out" | jq -r '.hookSpecificOutput.hookEventName // ""')"
+[ "$got_event" = 'PreToolUse' ] \
+  || fail "hookEventName must be PreToolUse for additionalContext to attach: got [$got_event]"
+
+# A pass-through must stay silent on both channels: no rewrite happened, so there
+# is nothing to announce and nothing to explain away.
+passthrough_out="$(run 'git log --grep status' false)"
+[ -z "$passthrough_out" ] \
+  || fail "pass-through emitted output: got [$passthrough_out]"
+
 if (( failures > 0 )); then
   printf '\n%d failure(s)\n' "$failures" >&2
   exit 1

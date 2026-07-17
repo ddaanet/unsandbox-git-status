@@ -65,9 +65,15 @@ while IFS= read -r seg; do
     # tool's arguments, so we carry every field through and change one — the
     # command, and any timeout/description, run exactly as the agent wrote them.
     updated_input=$(printf '%s' "$input" | jq -c '.tool_input | .dangerouslyDisableSandbox = true')
-    human_msg="unsandbox-git-status: ran git status unsandboxed."
-    jq -nc --argjson ui "$updated_input" --arg s "$human_msg" \
-      '{hookSpecificOutput: {hookEventName: "PreToolUse", permissionDecision: "allow", updatedInput: $ui}, systemMessage: $s}'
+    human_msg="unsandboxed call containing git status"
+    # The agent-facing half. systemMessage never enters the model's context, so
+    # without this the rewrite is invisible to the agent: it sees a sandboxed
+    # `git status` return a truthful tree and concludes the sandbox reports
+    # correctly. Stays information, never an instruction (see DESIGN) — it says
+    # what happened and what may not be inferred from it, and asks for nothing.
+    agent_msg="unsandbox-git-status: the hook rewrote this call to run with the command sandbox disabled, so the output reflects the real working tree. Only commands recognised as \`git status\` are rewritten, on a best-effort match; nothing else is affected. This says nothing about whether a sandboxed \`git status\` would be accurate."
+    jq -nc --argjson ui "$updated_input" --arg s "$human_msg" --arg a "$agent_msg" \
+      '{hookSpecificOutput: {hookEventName: "PreToolUse", permissionDecision: "allow", updatedInput: $ui, additionalContext: $a}, systemMessage: $s}'
     exit 0
   fi
 done <<EOF

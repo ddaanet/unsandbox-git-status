@@ -105,7 +105,9 @@ on stdout and exits 0, where `updatedInput` is the original `tool_input`
 with `dangerouslyDisableSandbox` flipped to `true`. Per the hooks API,
 `updatedInput` replaces the tool's arguments before it runs, so the command
 executes unsandboxed with no further interaction. A one-line `systemMessage`
-notes that it happened, for the human and the transcript.
+notes that it happened, for the human and the transcript, and an
+`additionalContext` note carries the same fact to the agent on the model
+channel.
 
 **This overturns the original deny-and-retry design** (`permissionDecision:
 "deny"` with an agent-facing `permissionDecisionReason` instructing a
@@ -123,10 +125,32 @@ and unrun, so the model hedged rather than retrying verbatim.
 The rewrite removes the delegated step entirely. There is no instruction for
 the agent to misread, no round-trip, no opportunity to improvise or
 mislearn. It is also strictly cheaper (zero extra turns) and degrades more
-gracefully on a false positive (see Limitations). The cost is that the fix
-is now invisible to the agent by default; the `systemMessage` exists so the
-change is not silent, and is phrased as *information* ("ran unsandboxed; no
-action needed"), never as an instruction the agent must act on.
+gracefully on a false positive (see Limitations).
+
+### Announce on both channels, as information
+
+The rewrite is announced twice, because the two channels have different
+audiences. `systemMessage` is user-visible and never enters the model's
+context; `hookSpecificOutput.additionalContext` is injected into the model's
+context and never shown to the user. Neither one reaches both.
+
+A `systemMessage` alone therefore leaves the rewrite *invisible to the
+agent*, and that silence is not neutral — it actively teaches the wrong
+lesson. The agent issues a sandboxed `git status`, receives a truthful
+working tree with no annotation, and concludes that the sandbox reports
+correctly, or that the harness changed. Observed in practice (Opus 4.8,
+2026-07-17): an agent read auto-unsandboxed output as evidence that "the
+sandbox is now clean" and nearly recorded it as a durable finding. The
+`additionalContext` closes that gap: it states that the call was rewritten
+and that the output is not evidence about sandbox behaviour.
+
+Both notices stay *information*, never an instruction the agent must act on
+— that constraint is what the deny-and-retry history bought, and adding a
+model-facing channel does not relax it. The agent-facing text says what
+happened and what may not be inferred from it; it asks for nothing, so there
+is still no delegated step to misread. It also claims nothing the hook
+cannot know: the hook knows it rewrote *this* call, not whether a sandboxed
+`git status` would misreport today or after some future harness update.
 
 ### Fire on every Bash call, filter internally
 
@@ -176,7 +200,8 @@ versioning.
   privilege grant the user didn't request, which is why the matcher stays
   precision-biased — a miss costs nothing, and a false positive should be
   rare enough that silently unsandboxing it is acceptable. The
-  `systemMessage` ("ran git status unsandboxed") is the only trace.
+  `systemMessage` ("unsandboxed call containing git status") and the
+  agent-facing `additionalContext` are the only trace.
 - **`jq` dependency, silent if absent.** The hook needs `jq` on `PATH`.
   Combined with fail-open (NFR3), a missing `jq` means the guard quietly
   does nothing rather than erroring — by design, but worth stating.
@@ -211,3 +236,25 @@ versioning.
   changed. Tests updated to assert REWRITE/PASS instead of DENY/ALLOW, plus
   a verbatim-preservation scenario (command and other `tool_input` fields
   survive the flip).
+
+- **2026-07-17 — announce the rewrite to the agent too.** Added
+  `hookSpecificOutput.additionalContext` alongside the existing
+  `systemMessage`. The rewrite design deliberately accepted being invisible
+  to the agent, on the reasoning that an agent told nothing cannot mislearn.
+  That reasoning was wrong in one direction: silence is itself a signal.
+  Observed 2026-07-17 (Opus 4.8), an agent ran a sandboxed `git status`,
+  got a clean truthful tree because this hook had rewritten the call, and
+  concluded the sandbox no longer misreports — a false durable lesson, and
+  the same class of mislearning the 2026-06-10 change set out to prevent.
+  The root cause was channel choice, not wording: `systemMessage` is
+  user-visible only, so the agent had never seen any notice at all.
+  `additionalContext` (verified this date to be honoured on `PreToolUse`,
+  and to be delivered even when the tool call itself fails) reaches the
+  model. The agent-facing text is deliberately generic and evidential — it
+  states that this call was rewritten, that detection is best-effort and
+  covers nothing but `git status`, and that the output implies nothing about
+  sandbox behaviour either way. It does not assert that the sandbox still
+  misreports: the hook cannot know that, and a future harness may change it.
+  Both notices remain information, never an instruction, so no delegated
+  step returns. Tests extended to assert both channels on a rewrite,
+  `hookEventName: PreToolUse`, and silence on a pass-through.

@@ -61,11 +61,19 @@ hook test. Must be green before committing.
   unsandboxed with no agent round-trip. Build `updatedInput` from the real
   `tool_input` (`jq '.tool_input | .dangerouslyDisableSandbox = true'`) so
   the command and every other field survive verbatim; never reconstruct it
-  by hand. `systemMessage` is a one-line *informational* notice ("ran
-  unsandboxed; no action needed") — keep it information, never an
-  instruction the agent must act on. The old deny-and-retry design was
-  overturned because agents reason about a denial instead of obeying it
-  (see DESIGN history, 2026-06-10).
+  by hand. The old deny-and-retry design was overturned because agents
+  reason about a denial instead of obeying it (see DESIGN history,
+  2026-06-10).
+- **Announce on both channels, as information.** `systemMessage` is a
+  one-line human notice; `additionalContext` tells the *agent* the call was
+  rewritten. Both are needed — `systemMessage` never enters the model's
+  context, and an unannounced rewrite teaches the agent that a sandboxed
+  `git status` is trustworthy. Keep both as information, never an
+  instruction the agent must act on, and claim only what the hook knows: it
+  rewrote this call. It does not know whether a sandboxed `git status`
+  misreports on the current harness, so the agent-facing text says the
+  output is no evidence either way rather than asserting the sandbox is
+  still broken.
 - **Cheap.** The hook fires on every Bash call (the `matcher` filters by
   tool name only). Keep it to jq parses and string work — no subprocess
   fan-out.
