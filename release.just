@@ -4,8 +4,33 @@
 #
 #     import 'plugin-dev/release.just'
 #
-# The plugin must define its own `precommit` recipe; `release` depends on it.
-# `.claude-plugin/plugin.json` must exist with a semver `.version` field.
+# The plugin must define two recipes of its own:
+#
+#     precommit:  ...        # the gate that runs before every commit
+#     prerelease: precommit  # the gate `release` depends on
+#
+# `release` depends on `prerelease`, never on `precommit` directly. For most
+# plugins the two are the same and `prerelease: precommit` is the whole
+# recipe. A plugin whose release gate is larger — slow or paid checks that
+# shouldn't fire on every commit — widens it there:
+#
+#     prerelease: precommit evals
+#
+# `prerelease` is mandatory: just rejects the whole justfile if a dependency
+# names a recipe that doesn't exist, so a plugin that hasn't defined it finds
+# out immediately, not at release time.
+#
+# `.claude-plugin/plugin.json` must exist with a semver `.version` field. It
+# holds the LAST released version and `just release <bump>` bumps forward from
+# it — except on a plugin that has never been released, where there is no
+# previous version to bump from and `just release` (no argument) publishes the
+# version the manifest already holds. That is what makes a first release work
+# straight out of a scaffold, whatever version the scaffold seeded. Passing an
+# explicit bump on a first release is refused rather than silently ignored.
+#
+# The `patch` default lives in release.sh, not in the recipe signature: the
+# recipe passes its argument through even when empty, so release.sh can tell an
+# explicit `patch` from no argument at all.
 #
 # Required env (typically set via .envrc):
 #   MARKETPLACE_DIR — path to the `claude-plugins` marketplace repo. The
@@ -15,133 +40,63 @@
 #   end-users discover plugins via the marketplace, so a tag without a
 #   marketplace bump is invisible to them.
 #
+# If a release dies partway — a rejected push, a `gh` failure — the plugin is
+# left tagged at the new version with a stale marketplace entry. `just
+# resume-release` completes it: it pushes whatever is missing and is a no-op
+# when everything already landed.
+#
+# `check-version` reports whether plugin.json and the marketplace entry agree.
+# It skips non-fatally when MARKETPLACE_DIR is unset, the marketplace repo
+# isn't checked out, or the plugin has no entry yet (pre-first-publication).
+#
 # Requirements: bash, jq, git, gh.
 
 toolkit_url := "git@github.com:ddaanet/claude-plugin-dev.git"
 toolkit_prefix := "plugin-dev"
 
-# Create release: bump plugin.json version, commit, tag, push main + tag,
-# create GitHub release, then bump the marketplace entry and push.
-release bump='patch': precommit
-    #!/usr/bin/env bash
-    set -euo pipefail
-    manifest=".claude-plugin/plugin.json"
-    git diff --quiet HEAD || { echo "error: uncommitted changes" >&2; exit 1; }
-    branch=$(git symbolic-ref -q --short HEAD || echo "")
-    # Use symbolic-ref (not rev-parse): when origin/HEAD is unset,
-    # rev-parse exits non-zero AND prints "origin/HEAD" to stdout, so
-    # the substitution captures both the failed output and the
-    # fallback. symbolic-ref is silent on stdout when the ref is unset.
-    main_branch=$(git symbolic-ref --short refs/remotes/origin/HEAD 2>/dev/null | sed 's|^origin/||' || echo "main")
-    [ "$branch" = "$main_branch" ] || { echo "error: must be on $main_branch (currently $branch)" >&2; exit 1; }
-    manifest_version=$(jq -r .version "$manifest")
-    latest_tag=$(git describe --tags --abbrev=0 2>/dev/null | sed 's/^v//' || true)
-    if [ -n "$latest_tag" ] && [ "$manifest_version" != "$latest_tag" ]; then
-      echo "error: plugin.json version ($manifest_version) does not match latest tag (v$latest_tag)" >&2
-      echo "hint: plugin.json holds the LAST released version. \`just release\` bumps from there." >&2
-      echo "      revert any manual version bump and re-run." >&2
-      exit 1
-    fi
-    # Marketplace pre-flight (fail fast before any destructive op).
-    [ -n "${MARKETPLACE_DIR:-}" ] || { echo "error: MARKETPLACE_DIR not set (set in .envrc to the claude-plugins repo root)" >&2; exit 1; }
-    marketplace_json="$MARKETPLACE_DIR/.claude-plugin/marketplace.json"
-    [ -f "$marketplace_json" ] || { echo "error: $marketplace_json not found" >&2; exit 1; }
-    plugin_name=$(jq -r .name "$manifest")
-    # A missing entry is not an error: on first publication we create one
-    # from plugin.json (see marketplace step below). But to synthesise the
-    # entry's `source` we need an `origin` remote to derive owner/repo from,
-    # so validate that here, before any destructive op.
-    if jq -e --arg n "$plugin_name" 'any(.plugins[]; .name == $n)' "$marketplace_json" >/dev/null; then
-      marketplace_entry_exists=1
-    else
-      marketplace_entry_exists=0
-      git remote get-url origin >/dev/null 2>&1 \
-        || { echo "error: '$plugin_name' has no entry in $marketplace_json and no 'origin' remote to derive one from" >&2; exit 1; }
-    fi
-    git -C "$MARKETPLACE_DIR" diff --quiet HEAD \
-      || { echo "error: $MARKETPLACE_DIR has uncommitted changes" >&2; exit 1; }
-    new_version=$(jq -r --arg bump "{{bump}}" '
-      (.version | split(".") | map(tonumber)) as [$maj,$min,$pat]
-      | if   $bump == "major" then [$maj+1, 0, 0]
-        elif $bump == "minor" then [$maj, $min+1, 0]
-        elif $bump == "patch" then [$maj, $min, $pat+1]
-        else error("unknown bump type: " + $bump) end
-      | map(tostring) | join(".")
-    ' "$manifest")
-    tag="v$new_version"
-    git rev-parse "$tag" >/dev/null 2>&1 && { echo "error: tag $tag already exists" >&2; exit 1; }
-    tmp=$(mktemp)
-    jq --arg v "$new_version" '.version = $v' "$manifest" > "$tmp"
-    mv "$tmp" "$manifest"
-    git add "$manifest"
-    git commit -m "release: $new_version"
-    git tag -a "$tag" -m "Release $new_version"
-    git push
-    git push origin "$tag"
-    gh release create "$tag" --title "Release $new_version" --generate-notes
-    # Marketplace bump, or create the entry on first publication.
-    mp_tmp=$(mktemp)
-    if [ "$marketplace_entry_exists" = 1 ]; then
-      jq --arg n "$plugin_name" --arg v "$new_version" \
-        '(.plugins[] | select(.name == $n) | .version) = $v' \
-        "$marketplace_json" > "$mp_tmp"
-    else
-      # Derive owner/repo from origin for the `github` source. Strip a
-      # trailing .git, then everything up to the host separator, leaving
-      # `owner/repo` for both git@host:owner/repo and https://host/owner/repo.
-      repo_slug=$(git remote get-url origin | sed -E 's#\.git$##; s#^.*[:/]([^/]+/[^/]+)$#\1#')
-      jq --arg v "$new_version" --arg repo "$repo_slug" --slurpfile m "$manifest" '
-        .plugins += [{
-          name: $m[0].name,
-          source: { source: "github", repo: $repo },
-          description: ($m[0].description // ""),
-          version: $v,
-          author: ($m[0].author // { name: "" }),
-          repository: ($m[0].repository // $m[0].homepage // ("https://github.com/" + $repo)),
-          license: ($m[0].license // "MIT")
-        }]
-      ' "$marketplace_json" > "$mp_tmp"
-    fi
-    mv "$mp_tmp" "$marketplace_json"
-    git -C "$MARKETPLACE_DIR" add .claude-plugin/marketplace.json
-    # Idempotent commit: when the entry was already at $new_version (e.g. the
-    # plugin was pre-added to the marketplace at this version), the rewrite is
-    # a no-op and `git commit` would exit 1 under `set -e`, aborting *after*
-    # the irreversible release steps. Only commit/push when something changed.
-    if git -C "$MARKETPLACE_DIR" diff --cached --quiet; then
-      echo "Release $tag complete (marketplace already at $new_version)"
-    else
-      git -C "$MARKETPLACE_DIR" commit -m "release: $plugin_name $new_version"
-      git -C "$MARKETPLACE_DIR" push
-      if [ "$marketplace_entry_exists" = 1 ]; then
-        echo "Release $tag complete (marketplace bumped to $new_version)"
-      else
-        echo "Release $tag complete (marketplace entry created at $new_version)"
-      fi
-    fi
+# Bump plugin.json (patch by default), commit, tag, push, GitHub release, bump marketplace.
+release bump='': prerelease
+    bash "{{toolkit_prefix}}/release.sh" "{{bump}}"
 
-# Update the vendored plugin-dev toolkit to a specific tag (recommended)
-# or branch. Run from the consumer plugin root, on a clean tree.
+# Complete a release that landed only partially. Idempotent, no gate.
+resume-release:
+    bash "{{toolkit_prefix}}/release.sh" --resume
+
+# Check plugin.json's version against its marketplace.json entry.
+check-version:
+    bash "{{toolkit_prefix}}/check-version.sh"
+
+# Pull the vendored plugin-dev toolkit up to a tag. Plugin root, clean tree.
 update-plugin-dev ref:
     #!/usr/bin/env bash
     set -euo pipefail
     git diff --quiet HEAD || { echo "error: uncommitted changes" >&2; exit 1; }
     [ -d "{{toolkit_prefix}}" ] || { echo "error: {{toolkit_prefix}}/ not found — is the toolkit vendored here?" >&2; exit 1; }
+    # Only a dist tag is vendorable. Every other ref -- source tag, branch,
+    # sha -- resolves to the toolkit's root tree, which is its own working
+    # environment: a `memory` gitlink, .claude/, CLAUDE.md, its own justfile.
+    # Pulling one copies all of that into this plugin and is invisible until
+    # someone runs `git submodule status`, so it is refused, not warned about.
     case "{{ref}}" in
-      v*) ;;
-      main|master|HEAD) echo "warning: pulling a branch ref ({{ref}}) — prefer a tag (vX.Y.Z) for reproducibility" >&2 ;;
-    esac
-    git subtree pull --prefix="{{toolkit_prefix}}" "{{toolkit_url}}" "{{ref}}" --squash
-    # Verify VERSION matches the requested tag (catches half-applied
-    # subtree pulls). VERSION first appeared in v0.2.0; older refs
-    # lack it, so the check is best-effort.
-    case "{{ref}}" in
+      dist-v*) ;;
       v*)
-        expected="$(printf '%s' "{{ref}}" | sed 's/^v//')"
-        if [ -f "{{toolkit_prefix}}/VERSION" ]; then
-          actual=$(tr -d '[:space:]' < "{{toolkit_prefix}}/VERSION")
-          [ "$actual" = "$expected" ] \
-            || echo "warning: {{toolkit_prefix}}/VERSION ($actual) does not match requested ref ({{ref}})" >&2
-        fi
+        echo "error: '{{ref}}' is a source tag — pull the dist tag instead: dist-{{ref}}" >&2
+        exit 1
+        ;;
+      *)
+        echo "error: '{{ref}}' is not a dist tag — pull dist-vX.Y.Z" >&2
+        echo "       only the dist lineage contains the consumer-facing files." >&2
+        exit 1
         ;;
     esac
+    git subtree pull --prefix="{{toolkit_prefix}}" "{{toolkit_url}}" "{{ref}}" --squash
+    # Verify VERSION matches the requested tag (catches half-applied subtree
+    # pulls). Unconditional: the guard above means only a dist-v* ref reaches
+    # here, so the version is always extractable. Still best-effort on the
+    # file, which a ref older than v0.2.0 lacks.
+    expected="$(printf '%s' "{{ref}}" | sed 's/^dist-v//')"
+    if [ -f "{{toolkit_prefix}}/VERSION" ]; then
+      actual=$(tr -d '[:space:]' < "{{toolkit_prefix}}/VERSION")
+      [ "$actual" = "$expected" ] \
+        || echo "warning: {{toolkit_prefix}}/VERSION ($actual) does not match requested ref ({{ref}})" >&2
+    fi
