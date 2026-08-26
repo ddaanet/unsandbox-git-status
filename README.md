@@ -1,5 +1,18 @@
 # unsandbox-git-status
 
+> **Retired 2026-08-26.** No longer maintained or recommended. Claude Code's
+> native `sandbox.excludedCommands` setting does the same job for *every*
+> `git` invocation, not just `git status`, is honoured in strict sandbox
+> mode, and does not pre-approve the command the way this hook did:
+>
+> ```json
+> "sandbox": { "excludedCommands": ["git:*"] }
+> ```
+>
+> in `~/.claude/settings.json`. The code stays as a record; see `DESIGN.md`
+> (status note, Limitations, History 2026-08-26) for what was found and why
+> the plugin was retired rather than fixed.
+
 A Claude Code plugin that forces `git status` to run with the command
 sandbox **disabled**.
 
@@ -12,16 +25,17 @@ tree — character-device nodes that exist only inside the sandbox view. A
 not actually there, so the agent reads a polluted, untrustworthy status.
 The same command run unsandboxed reports the real working tree.
 
-This plugin closes that gap mechanically: it intercepts `git status`
-before it runs and, if the call is sandboxed, denies it with an
-instruction to re-run the identical command with the sandbox off.
+This plugin closed that gap mechanically: it intercepted `git status`
+before it ran and, if the call was sandboxed, rewrote it in place to run
+with the sandbox off.
 
 ## What it does
 
 - A `PreToolUse(Bash)` hook inspects every Bash command.
 - If a segment is a `git status` invocation **and** the call is sandboxed,
-  it denies the call and tells the agent to re-run with
-  `dangerouslyDisableSandbox: true`.
+  it rewrites the call (`permissionDecision: "allow"` + `updatedInput`)
+  with `dangerouslyDisableSandbox: true`, so it runs unsandboxed with no
+  agent round-trip.
 - Everything else passes untouched — other commands, other git
   subcommands, and any `git status` that is already unsandboxed.
 
@@ -43,12 +57,9 @@ pick it up in the current one).
 
 ## Verify
 
-When it fires you will see the call denied with a reason like:
-
-> git status was run sandboxed. Re-run the exact same Bash command with
-> dangerouslyDisableSandbox set to true.
-
-The agent then re-issues the command unsandboxed and gets the true status.
+When it fires you will see a one-line notice — "unsandboxed call
+containing git status" — and the agent receives a matching
+`additionalContext` note saying the call was rewritten.
 
 ## Requirements
 

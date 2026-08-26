@@ -11,3 +11,6 @@ precommit:
     bash -n hooks/require-unsandboxed-git-status.sh tests/hook-test.sh
     bash tests/hook-test.sh
     @echo ok
+
+# Gate for `just release` (required by the vendored plugin-dev toolkit).
+prerelease: precommit

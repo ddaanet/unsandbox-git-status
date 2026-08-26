@@ -5,6 +5,13 @@ with code in this repository.
 
 # Agent Instructions — unsandbox-git-status
 
+> **Retired 2026-08-26.** Superseded by the user-wide
+> `sandbox.excludedCommands` setting (`git:*`). The hook, tests and docs are
+> kept as a record; the plugin is not maintained or released further. Do
+> not extend the matcher or cut releases without an explicit request. See
+> `DESIGN.md` (status note, Limitations, History 2026-08-26) for the
+> permission-gate hole that was found and left unfixed.
+
 This repository **is** a Claude Code plugin. Its single deliverable is a
 `PreToolUse(Bash)` hook that forces `git status` to run with the command
 sandbox disabled. The hook ships to end-users' sessions; keep that in

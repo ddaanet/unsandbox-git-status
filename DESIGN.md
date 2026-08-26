@@ -4,6 +4,12 @@ Living design document. Updated when meaningful design decisions land or
 get overturned. Not a changelog of features — a record of *why this
 plugin has the shape it has*.
 
+**Status: retired 2026-08-26.** Superseded by Claude Code's native
+`sandbox.excludedCommands` setting, configured user-wide as `"git:*"`. The
+hook is kept in the tree as a record; no further releases are planned. See
+the last Limitations entry for the permission-gate hole that was found and
+left unfixed, and the 2026-08-26 history entry for the reasoning.
+
 ## Problem
 
 Claude Code runs Bash commands in a command sandbox by default. The
@@ -206,6 +212,26 @@ versioning.
   Combined with fail-open (NFR3), a missing `jq` means the guard quietly
   does nothing rather than erroring — by design, but worth stating.
 
+- **`permissionDecision: "allow"` settles the permission gate for the whole
+  command.** The hook re-emits the entire `tool_input` with one field
+  flipped, so a compound containing a `git status` segment runs unsandboxed
+  in its entirety (`git status && <anything>`). That much was documented
+  above. What was not: `"allow"` is a decision, not a deferral. From the
+  Claude Code 2.1.233 bundle — with `updatedInput` *alone*, the hook
+  result is `hookUpdatedInput`, the rewritten input is assigned, and the
+  full permission pipeline runs over it; since the command is no longer
+  sandboxed, `autoAllowBashIfSandboxed` no longer applies and the auto-mode
+  classifier weighs it. With `permissionDecision: "allow"`, the only
+  remaining re-check is for a matching deny rule, a matching ask rule, or
+  two narrow ask reasons; a passthrough leaves the hook's allow standing.
+  So everything chained alongside a `git status` runs unsandboxed **and**
+  pre-approved, with the classifier never consulted. Confirmed live:
+  `true && git status --porcelain` was rewritten and ran. The fix is to
+  drop `permissionDecision` and emit `updatedInput` alone — a bare
+  `git status` is classified read-only and auto-allowed ahead of the
+  classifier anyway, so the happy path loses nothing. Not applied: the
+  plugin was retired instead (History, 2026-08-26).
+
 ## History
 
 - **2026-06-07 — initial.** Extracted from a
@@ -258,3 +284,30 @@ versioning.
   Both notices remain information, never an instruction, so no delegated
   step returns. Tests extended to assert both channels on a rewrite,
   `hookEventName: PreToolUse`, and silence on a pass-through.
+
+- **2026-08-26 — retired.** Superseded by Claude Code's native
+  `sandbox.excludedCommands` (`~/.claude/settings.json`:
+  `"sandbox": {"excludedCommands": ["git:*", …]}`). Two things converged.
+  First, a decompilation of the 2.1.233 permission pipeline (done in the
+  gitlore repo while reviewing its `sandbox-effects` memory) showed that
+  `permissionDecision: "allow"` does more than let the rewrite through: it
+  settles the permission decision, so anything chained alongside a
+  `git status` runs unsandboxed *and* unclassified — see Limitations.
+  Second, the native exclusion is the better tool on every axis that
+  matters: `git:*` covers every git invocation rather than a best-effort
+  `git status` subset (verified live on 2.1.234 — `git log -1 --oneline`
+  runs with `$TMPDIR` unset, and `ls -a` shows none of the phantom masks);
+  it is honoured in strict sandbox mode, where `dangerouslyDisableSandbox`
+  is refused outright; and it leaves the permission gate untouched, so
+  excluded commands stay classifier-evaluated. The one shape the exclusion
+  matcher does not reach is a `git status` wrapped in `( … )`, `$( … )` or
+  `sh -c '…'`, which this hook's segment split would have caught; the
+  rewrite that produces that shape (in `cwd-safety`) is proposed for
+  removal separately, so the gap is accepted rather than carried by keeping
+  this hook alive. The brief that surfaced the hole suggested fixing the
+  gate first and retiring after a soak period; retirement was chosen
+  directly, because the exclusion had already been verified live and the
+  plugin was already disabled user-side, so a gate fix would ship to
+  nobody. The code, tests and this document stay as a record of the design
+  — and of why a `PreToolUse` rewrite that pairs `updatedInput` with
+  `permissionDecision: "allow"` is the wrong construction.
